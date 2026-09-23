@@ -61,3 +61,48 @@ def test_loader_validation_errors():
     })
     nodes, errors = DataLoader.validate_and_parse(no_depot_df)
     assert any("Missing DEPOT" in e for e in errors)
+
+
+def test_auto_mapping_and_adaptation():
+    """Verify DataLoader can adapt arbitrary non-logistics dataframes."""
+    import pandas as pd
+    
+    # 1. Test arbitrary enterprise survey style dataframe (zero geographic columns)
+    survey_df = pd.DataFrame({
+        "Year": [2024, 2024, 2024, 2024, 2024],
+        "Industry_name": ["Finance", "Manufacturing", "Retail", "Healthcare", "Agriculture"],
+        "Value": [120.5, 85.0, 45.2, 90.1, 33.4],
+        "Units": ["Dollars", "Dollars", "Dollars", "Dollars", "Dollars"]
+    })
+    
+    adapted_nodes, notes = DataLoader.adapt_any_dataframe(
+        df=survey_df,
+        num_stops=4,
+        id_col="Industry_name",
+        demand_col="Value",
+        depot_lat=17.3850,
+        depot_lon=78.4867
+    )
+    assert len(adapted_nodes) == 4
+    assert adapted_nodes[0].is_depot is True
+    assert adapted_nodes[0].demand == 0.0
+    for node in adapted_nodes[1:]:
+        assert node.is_depot is False
+        assert 1.0 <= node.demand <= 25.0
+        assert 1 <= node.priority <= 5
+        assert -90.0 <= node.latitude <= 90.0
+        assert -180.0 <= node.longitude <= 180.0
+
+    # 2. Test auto column alias mapping
+    aliased_df = pd.DataFrame({
+        "name": ["DEPOT", "ShopA", "ShopB"],
+        "lat": [17.3850, 17.4000, 17.3700],
+        "lon": [78.4867, 78.4800, 78.5000],
+        "weight": [0, 5, 8],
+        "urgency": [0, 3, 2]
+    })
+    mapped_nodes, mapping, errors = DataLoader.try_auto_map_and_parse(aliased_df)
+    assert len(errors) == 0
+    assert mapped_nodes is not None
+    assert len(mapped_nodes) == 3
+    assert mapped_nodes[0].id == "DEPOT"

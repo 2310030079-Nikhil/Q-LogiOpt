@@ -130,6 +130,207 @@ class DataLoader:
         return ordered_nodes, []
 
     @classmethod
+    def detect_column_mapping(cls, df: pd.DataFrame) -> dict:
+        """
+        Detects potential column mappings for standard logistics fields from any DataFrame.
+        Returns a dictionary mapping standard fields to detected DataFrame column names (or None).
+        """
+        aliases = {
+            "location_id": [
+                "location_id", "location", "loc_id", "id", "stop_id", "stop", "name", 
+                "customer", "customer_id", "station", "node", "point", "site", "address",
+                "destination", "description", "category", "code", "label"
+            ],
+            "latitude": [
+                "latitude", "lat", "lat_deg", "y", "coord_y", "coord_lat", "geo_lat", 
+                "pickup_latitude", "dropoff_latitude", "start_lat", "end_lat"
+            ],
+            "longitude": [
+                "longitude", "lon", "lng", "long", "x", "coord_x", "coord_lon", "geo_lon", 
+                "pickup_longitude", "dropoff_longitude", "start_lon", "end_lon"
+            ],
+            "demand": [
+                "demand", "weight", "weight_kg", "qty", "quantity", "load", "volume", 
+                "packages", "orders", "boxes", "units", "size", "parcel_count", "capacity_used", "value"
+            ],
+            "priority": [
+                "priority", "prio", "urgency", "level", "rank", "importance", "tier", 
+                "service_level", "sla", "class"
+            ]
+        }
+        
+        mapping = {}
+        cols_lower = {str(c).strip().lower(): c for c in df.columns}
+        
+        for std_field, alias_list in aliases.items():
+            matched = None
+            for alias in alias_list:
+                if alias in cols_lower:
+                    matched = cols_lower[alias]
+                    break
+            mapping[std_field] = matched
+            
+        return mapping
+
+    @classmethod
+    def try_auto_map_and_parse(cls, df: pd.DataFrame) -> Tuple[Optional[List[LocationNode]], dict, List[str]]:
+        """
+        Attempts to automatically map columns using fuzzy alias detection and parse valid nodes.
+        Returns: (nodes_or_None, mapping_dict, errors_list)
+        """
+        mapping = cls.detect_column_mapping(df)
+        
+        # If latitude and longitude are missing, auto-mapping cannot produce coordinates directly
+        if not mapping.get("latitude") or not mapping.get("longitude"):
+            return None, mapping, ["Coordinates (latitude, longitude) could not be automatically identified."]
+            
+        # Build renamed copy
+        rename_dict = {}
+        for std_name, src_name in mapping.items():
+            if src_name:
+                rename_dict[src_name] = std_name
+                
+        mapped_df = df.rename(columns=rename_dict).copy()
+        
+        # Fill missing location_id with default labels if needed
+        if "location_id" not in mapped_df.columns:
+            mapped_df["location_id"] = [f"Stop_{i}" for i in range(len(mapped_df))]
+            
+        # Fill missing demand with default 5.0
+        if "demand" not in mapped_df.columns:
+            mapped_df["demand"] = 5.0
+            
+        # Fill missing priority with default 3
+        if "priority" not in mapped_df.columns:
+            mapped_df["priority"] = 3
+            
+        nodes, errors = cls.validate_and_parse(mapped_df)
+        if not errors:
+            return nodes, mapping, []
+        return None, mapping, errors
+
+    @classmethod
+    def adapt_any_dataframe(
+        cls,
+        df: pd.DataFrame,
+        num_stops: int = 4,
+        depot_lat: float = 17.3850,
+        depot_lon: float = 78.4867,
+        radius_km: float = 8.0,
+        id_col: Optional[str] = None,
+        lat_col: Optional[str] = None,
+        lon_col: Optional[str] = None,
+        demand_col: Optional[str] = None,
+        priority_col: Optional[str] = None,
+        seed: int = 42
+    ) -> Tuple[List[LocationNode], List[str]]:
+        """
+        Universal CSV Adapter: Converts ANY uploaded DataFrame (even non-logistics or survey data)
+        into a valid, calibrated Logistics Network suitable for QAOA and Classical solvers.
+        """
+        notes: List[str] = []
+        n_stops = max(3, min(num_stops, len(df) if len(df) >= 3 else 3))
+        np.random.seed(seed)
+        
+        # Take the first n_stops rows from df
+        sub_df = df.iloc[:n_stops].copy() if len(df) >= n_stops else df.copy()
+        while len(sub_df) < n_stops:
+            sub_df = pd.concat([sub_df, df.iloc[:(n_stops - len(sub_df))]], ignore_index=True)
+            
+        nodes: List[LocationNode] = []
+        
+        # 1. Row 0 is ALWAYS the Depot
+        depot_id = "DEPOT"
+        if id_col and id_col in sub_df.columns:
+            raw_depot_name = str(sub_df.iloc[0][id_col]).strip()[:15].replace(" ", "_")
+            depot_id = f"DEPOT_{raw_depot_name}" if raw_depot_name else "DEPOT"
+            
+        depot = LocationNode(
+            id=depot_id,
+            latitude=round(depot_lat, 4),
+            longitude=round(depot_lon, 4),
+            demand=0.0,
+            priority=0,
+            is_depot=True
+        )
+        nodes.append(depot)
+        notes.append(f"Designated stop 0 ('{depot_id}') as the central DEPOT at ({depot_lat:.4f}, {depot_lon:.4f}).")
+        
+        # 2. Rows 1 .. n_stops-1 are Customer Stops
+        KM_PER_DEG_LAT = 111.0
+        deg_lon_factor = KM_PER_DEG_LAT * np.cos(np.radians(depot_lat))
+        
+        for idx in range(1, n_stops):
+            row = sub_df.iloc[idx]
+            
+            # Stop ID
+            if id_col and id_col in sub_df.columns:
+                raw_name = str(row[id_col]).strip()
+                # Clean and truncate long strings
+                clean_name = "".join(c for c in raw_name if c.isalnum() or c in ("_", "-"))[:12]
+                stop_id = f"C{idx}_{clean_name}" if clean_name else f"C{idx}"
+            else:
+                stop_id = f"C{idx}"
+                
+            # Coordinates
+            has_valid_coords = False
+            if lat_col and lon_col and lat_col in sub_df.columns and lon_col in sub_df.columns:
+                try:
+                    c_lat = float(row[lat_col])
+                    c_lon = float(row[lon_col])
+                    if -90.0 <= c_lat <= 90.0 and -180.0 <= c_lon <= 180.0 and not (np.isnan(c_lat) or np.isnan(c_lon)):
+                        has_valid_coords = True
+                        stop_lat, stop_lon = c_lat, c_lon
+                except (ValueError, TypeError):
+                    has_valid_coords = False
+                    
+            if not has_valid_coords:
+                # Synthesize clustered coordinate around depot
+                angle = (2.0 * np.pi * (idx - 1) / (n_stops - 1)) + (np.random.uniform(-0.3, 0.3))
+                dist = np.random.uniform(0.35, 0.95) * radius_km
+                stop_lat = depot_lat + (dist * np.sin(angle)) / KM_PER_DEG_LAT
+                stop_lon = depot_lon + (dist * np.cos(angle)) / deg_lon_factor
+                
+            # Demand
+            stop_demand = float(np.random.randint(2, 9))
+            if demand_col and demand_col in sub_df.columns:
+                try:
+                    raw_dem = float(row[demand_col])
+                    if not np.isnan(raw_dem) and raw_dem > 0:
+                        # Scale if too large (e.g. enterprise revenue in millions)
+                        if raw_dem > 25.0:
+                            stop_demand = round(2.0 + (raw_dem % 12.0), 1)
+                        else:
+                            stop_demand = round(raw_dem, 1)
+                except (ValueError, TypeError):
+                    pass
+                    
+            # Priority
+            stop_priority = int(np.random.randint(1, 6))
+            if priority_col and priority_col in sub_df.columns:
+                try:
+                    raw_prio = int(float(row[priority_col]))
+                    if 1 <= raw_prio <= 5:
+                        stop_priority = raw_prio
+                    elif raw_prio > 5:
+                        stop_priority = int(1 + (raw_prio % 5))
+                except (ValueError, TypeError):
+                    pass
+                    
+            node = LocationNode(
+                id=stop_id,
+                latitude=round(stop_lat, 4),
+                longitude=round(stop_lon, 4),
+                demand=stop_demand,
+                priority=stop_priority,
+                is_depot=False
+            )
+            nodes.append(node)
+            
+        notes.append(f"Successfully converted {n_stops - 1} records into customer delivery stops.")
+        return nodes, notes
+
+    @classmethod
     def from_csv_file(cls, filepath_or_buffer: Union[str, io.StringIO, io.BytesIO]) -> Tuple[List[LocationNode], List[str]]:
         """Loads and validates dataset from a file path or in-memory buffer."""
         try:
