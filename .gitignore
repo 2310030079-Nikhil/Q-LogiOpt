@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest cache
+.pytest_cache/
+
+# Streamlit config & cache
+.streamlit/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Output benchmarks
+data/generated/
+*.csv.tmp
+
+# OS generated files
+.DS_Store
+Thumbs.db
