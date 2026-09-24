@@ -35,6 +35,12 @@ class RouteMapVisualizer:
         """
         fig = go.Figure()
         
+        # Support Plotly 6+ (MapLibre go.Scattermap / layout.map) and legacy (go.Scattermapbox)
+        ScatterTrace = getattr(go, "Scattermap", None)
+        use_maplibre = ScatterTrace is not None
+        if not use_maplibre:
+            ScatterTrace = getattr(go, "Scattermapbox")
+        
         # 1. Plot routes as lines
         route_colors = {
             "Nearest Neighbor": "#FF9100",
@@ -62,7 +68,7 @@ class RouteMapVisualizer:
             ]
             
             fig.add_trace(
-                go.Scattermapbox(
+                ScatterTrace(
                     lat=route_lats,
                     lon=route_lons,
                     mode="lines+markers",
@@ -89,7 +95,7 @@ class RouteMapVisualizer:
             ]
             
             fig.add_trace(
-                go.Scattermapbox(
+                ScatterTrace(
                     lat=cust_lats,
                     lon=cust_lons,
                     mode="markers+text",
@@ -112,7 +118,7 @@ class RouteMapVisualizer:
         # 3. Plot Depot separately with distinct star/large marker
         depot_node = next((n for n in nodes if n.is_depot), nodes[0])
         fig.add_trace(
-            go.Scattermapbox(
+            ScatterTrace(
                 lat=[depot_node.latitude],
                 lon=[depot_node.longitude],
                 mode="markers+text",
@@ -130,13 +136,15 @@ class RouteMapVisualizer:
         center_lat = np.mean([n.latitude for n in nodes])
         center_lon = np.mean([n.longitude for n in nodes])
         
+        map_config = dict(
+            style="open-street-map",
+            center=dict(lat=center_lat, lon=center_lon),
+            zoom=11.5
+        )
+        map_layout_kw = {"map": map_config} if use_maplibre else {"mapbox": map_config}
+        
         fig.update_layout(
             title="",
-            mapbox=dict(
-                style="open-street-map",
-                center=dict(lat=center_lat, lon=center_lon),
-                zoom=11.5
-            ),
             margin=dict(l=10, r=10, t=10, b=40),
             paper_bgcolor="#0E1117",
             plot_bgcolor="#0E1117",
@@ -147,7 +155,8 @@ class RouteMapVisualizer:
                 xanchor="center",
                 x=0.5,
                 font=dict(color="#FAFAFA", size=11)
-            )
+            ),
+            **map_layout_kw
         )
         
         return fig
